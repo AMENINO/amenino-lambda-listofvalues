@@ -1,0 +1,185 @@
+openapi: 3.0.0
+info:
+  title: amenino-lambda-listofvalues
+  version: '1.0'
+  description: API para obter lista valores de dominio.
+  contact:
+    name: Mauricio Veloso
+    url: 'https://github.com/alparMauricioVeloso'
+    email: mauricio.veloso@alpar.com.br
+servers:
+  - url: 'https://apigw-dev1.amenino.com.br/act/listofvalues'
+    description: dev
+  - url: 'https://apigw-hml5.amenino.com.br/act/listofvalues'
+    description: hml
+x-amazon-apigateway-cors:
+  allowMethods:
+    - '*'
+  allowHeaders:
+    - content-type
+    - authorization
+    - access-control-allow-origin
+    - apigw-requestid
+    - language
+    - channel
+    - region
+    - x-amz-date
+    - x-amz-security-token
+    - x-api-key
+    - x-strackid
+  exposeHeaders:
+    - content-type
+    - authorization
+    - access-control-allow-origin
+    - apigw-requestid
+    - language
+    - channel
+    - region
+    - x-amz-date
+    - x-amz-security-token
+    - x-api-key
+    - x-strackid
+  maxAge: 0
+  allowCredentials: false
+  allowOrigins:
+    - '*'
+
+paths:
+  /values:
+    get:
+      # security:
+      #   - Auth0: []
+      summary: Listar valoes por tipo
+      tags: []
+      responses:
+        default:
+          description: "Default response for GET /values"
+          headers:
+            Access-Control-Allow-Origin:
+              type: string
+            Access-Control-Allow-Methods:
+              type: string
+            Access-Control-Allow-Headers:
+              type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetValuesByTypeResponse'
+    options:
+      consumes:
+      - application/json
+      produces:
+      - application/json
+      responses:
+        '200':
+          description: 200 response
+          schema:
+            $ref: "#/definitions/Empty"
+          headers:
+            Access-Control-Allow-Origin:
+              type: string
+            Access-Control-Allow-Methods:
+              type: string
+            Access-Control-Allow-Headers:
+              type: string
+      x-amazon-apigateway-integration:
+        responses:
+          default:
+            statusCode: 200
+            responseParameters:
+              method.response.header.Access-Control-Allow-Methods: "'DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT'"
+              method.response.header.Access-Control-Allow-Headers: "'channel,Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,x-strackid,region,language,x-recaptcha'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        passthroughBehavior: when_no_match
+        requestTemplates:
+          application/json: "{\"statusCode\": 200}"
+        type: mock                
+      operationId: get-v1-values-by-type
+      description: Listar valoes por tipo
+      parameters:
+        - schema:
+            type: string
+          in: query
+          name: language
+          required: true
+        - schema:
+            type: string
+          in: query
+          name: type
+          required: true
+        - schema:
+            type: string
+          in: query
+          name: sortByField
+          required: false
+        - schema:
+            type: string
+          in: query
+          name: sortOrder
+          required: false
+        - schema:
+            type: string
+          in: query
+          name: page
+          required: false
+        - schema:
+            type: string
+          in: query
+          name: quantity
+          required: false
+    parameters: []
+components:
+  schemas:
+    GetValuesByTypeResponse:
+      title: GetValuesByTypeResponse
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            valueByTypeList:
+              $ref: '#/components/schemas/ValueByTypeListType'
+            metaInformation: 
+              $ref: '#/components/schemas/MetaInformationType'
+    ValueByTypeListType:
+      title: ValueByTypeListType
+      type: array
+      items:
+        $ref: '#/components/schemas/ValueTypeType'        
+    ValueTypeType:
+      title: ValueTypeType
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        description:
+          type: string          
+    MetaInformationType:
+      title: MetaInformationType
+      type: object
+      properties:
+        pagination:
+          type: object
+          properties:
+            page:
+              type: number
+            quantity:
+              type: number
+            total:
+              type: number
+  securitySchemes:
+    Auth0:
+      type: oauth2
+      flows: {}
+      x-amazon-apigateway-authorizer:
+        identitySource: $request.header.Authorization
+        jwtConfiguration:
+          audience:
+            - 'Fn::Sub': '${Auth0CustomAudience}'
+          issuer:
+            'Fn::Sub': '${Auth0CustomTokenIssuer}'
+        type: jwt
+      description: ''
+

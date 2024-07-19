@@ -1,0 +1,357 @@
+import groovy.io.*
+
+
+import groovy.io.*
+
+def call(Map pipelineParams) {
+
+    /*
+        Global groovy variables
+    */
+    def ameninoCommon        = new br.com.amenino.Common()
+    def ameninoNotification  = new br.com.amenino.Notification()
+    def ameninoGit           = new br.com.amenino.Git()
+    def ameninoCF            = new br.com.amenino.CloudFormation()
+    def ameninoBuild         = new br.com.amenino.Build()
+    def ameninoSonar         = new br.com.amenino.Sonar()
+    def ameninoUnitTest      = new br.com.amenino.UnitTest()
+    def ameninoJiraops       = new br.com.amenino.JiraOps()
+    def newVersion          = [:]
+    def cfUrls              = [:]
+    def rundeckUrls         = [:]
+    def commitMessage       = ""
+    def thisGV              = libraryResource 'GLOBAL_VARS.yaml'
+    def globalVars          = readYaml text: thisGV
+    globalVars.each { eachKey, eachValue ->
+        env[eachKey] = eachValue
+    }
+
+    pipeline {
+        agent any
+        // agent {
+        //     label 'jenkins-qa'
+        // }
+        // agent {
+        //     docker {
+        //         image "node:13-slim"
+        //         args '-p 3000:3000'
+        //     }
+        // }
+
+        environment {
+            /*
+                Global environment variables
+                   Comment RUN_* if want to turn it off
+            */
+            RUN_SONAR           = false
+            RUN_DEPLOY          = true
+            RUN_UNITEST         = false
+            // STACK_NAME          = (env.JOB_NAME =~ /^.+\/(.+)\/.+$/)[0][1]
+            // REPO_NAME           = sh(script: "git remote show -n origin | grep Fetch | sed -r 's,.*:(.*).git,\\1,' |tr -d '\n'", returnStdout: true).trim()
+        }
+
+        tools {
+            nodejs 'NodeJsv14.16.0'
+        }
+
+
+        options {
+            // Only keep the 50 most recent builds
+            buildDiscarder(logRotator(numToKeepStr: '50'))
+            timeout(time: 30, unit: 'MINUTES')
+        }
+
+        stages {
+
+            stage('Abort PR/Branch Indexing Build'){
+                when {
+                    anyOf {
+                        branch pattern: "PR-\\d+", comparator: "REGEXP"
+                        expression { return currentBuild.rawBuild.getCauses().toString().contains('BranchIndexingCause') }
+                    }
+                }
+                steps {
+                    script{
+                        currentBuild.result = 'ABORTED'
+                        error("Para o build por ter sido disparado pelo PR ou Branch Indexing")
+                    }
+                }
+            }
+
+            stage('Check commit message') {
+                steps {
+                    script {
+                        commitMessage = ameninoCommon.checkCommitMessage()
+                    }
+                }
+            }
+
+            stage('Merge Back') {
+                when {
+                    branch 'master'
+                    expression { "${commitMessage}" == 'Prepare for next Release' }
+                }
+                steps {
+                    script {
+                        ameninoGit.mergeBack()
+                    }
+                }
+            }
+
+            stage('Notify') {
+                steps {
+                    script {
+                        ameninoNotification.send('STARTED', null, null)
+                    }
+                }
+            }
+
+            stage('Pre-Build CheckList') {
+                steps {
+                    script {
+                        ameninoGit.checkCommitBehind()
+                        // if (pipelineParams.isCloudFormation == "true") {
+                        if (pipelineParams.isCloudFormation) {
+                            ameninoCF.checkTemplateFileName()
+
+                            try {
+                                ameninoCF.checkTags()
+                            } catch (ex) {
+                                unstable("The required tags validation step failed")
+                            }
+                        }
+                        newVersion = ameninoCommon.updateVersion()
+                        sh(
+                            script: "echo \"['dev1']\" > auto-deploy.json",
+                            label: ""
+                        )
+                    }
+                }
+            }
+
+            stage('Build dependencies') {
+                steps {
+                    script {
+                        sh(
+                            script: "npm install", 
+                            label: "Installing packages in package.json"
+                        )
+                        sh(
+                            script: "npm run build", 
+                            label: "Bulding sources"
+                        )
+                    }
+                }
+            }
+
+            stage('Unit Tests') {
+                when {
+                    // Jenkins - colocar true/false COM aspas
+                    expression { "${pipelineParams.runUnitTest}" == 'true' }
+                }
+                steps {
+                    script {
+                        sh(
+                            script: "npm run test"
+                        )
+                    }
+                }
+            }
+
+            stage('Sonar publish') {
+                when {
+                    environment name: 'RUN_SONAR', value: 'true'
+                    expression { "${pipelineParams.runSonar}" != 'false' }
+                }
+
+                steps {
+                    script {
+                        ameninoSonar.publish_new()
+                    }
+                }
+            }
+
+            stage('Build Cloud Formation') {
+                when {
+                    expression { "${pipelineParams.isCloudFormation}" == 'true' }
+                }
+                steps {
+                    script {
+                        cfUrls = ameninoBuild.cloudFormation(newVersion.generic.new)
+                    }
+                }
+            }
+
+            stage('Make Sam Package') {
+                when {
+                    expression { "${pipelineParams.isSam}" == 'true' }
+                }
+                steps {
+                    script {
+                        cfUrls = sam(newVersion.generic.new, pipelineParams.ecrUrl)
+                    }
+                }
+            }
+
+            stage('Check quality gate') {
+                when {
+                    environment name: 'RUN_SONAR', value: 'true'
+                    expression { "${pipelineParams.runSonar}" != 'false' }
+                    // expression { "${pipelineParams.buildType}" != 'python' }
+                }
+                steps {
+                    script {
+                        ameninoSonar.qualityGate()
+                    }
+                }
+            }
+
+            stage('Deploy stack') {
+                when {
+                    environment name: 'RUN_DEPLOY', value: 'true'
+                    expression { fileExists('auto-deploy.json').toString() == 'true' }
+                }
+                steps {
+                    script {
+
+                        def allEnv2Deploy = readJSON file: 'auto-deploy.json'
+                        allEnv2Deploy.each { envName ->
+                            rundeckUrls[envName] = ameninoCF.deploy(
+                                envName,
+                                cfUrls.urlTemplate,
+                                (pipelineParams.typeParameter == "old" ? env.RUNDECK_URL_WRONG : env.RUNDECK_URL),
+                                (pipelineParams.typeParameter == "old" ? env.RUNDECK_CF_JOB : env.RUNDECK_GENERICCF_JOB),
+                                (pipelineParams.typeParameter == "old" ? env.RUNDECK_CF_PROJECT : env.RUNDECK_GENERICCF_PROJECT + envName.toUpperCase())
+                                )
+                        }
+                    }
+                }
+            }
+
+            stage('Summary') {
+                steps {
+                    script {
+                        echo "CloudFormation URL: ${cfUrls.urlTemplate}"
+                        rundeckUrls.each { eachEnv, eachUrl ->
+                            echo "Deploy of ${eachEnv} progress at ${eachUrl}"
+                        }
+                    }
+                }
+            }
+
+        }
+
+        post {
+            success {
+                script {
+                    def jiraops_type = pipelineParams.isDatahub == true ? "datahub" : "cloudformation"
+                    ameninoNotification.send('SUCCESSFUL', "${cfUrls.urlTemplate}", "cloudformation-deploy")
+                    // disbale jiraops slack button
+                    // ameninoNotification.sendV2('SUCCESSFUL', "${cfUrls.urlTemplate}", "cloudformation-deploy", "cloudformation")
+                    ameninoJiraops.sendToCard("${cfUrls.urlTemplate}", BRANCH_NAME, jiraops_type)
+
+                    echo "success"
+                }
+            }
+            unstable {
+                script {
+                    def jiraops_type = pipelineParams.isDatahub == true ? "datahub" : "cloudformation"
+                    ameninoNotification.send('SUCCESSFUL', "${cfUrls.urlTemplate}", "cloudformation-deploy")
+                    // disbale jiraops slack button
+                    // ameninoNotification.sendV2('SUCCESSFUL', "${cfUrls.urlTemplate}", "cloudformation-deploy", "cloudformation")
+                    ameninoJiraops.sendToCard("${cfUrls.urlTemplate}", BRANCH_NAME, jiraops_type)
+
+                    echo "success"
+                }
+            }
+            failure {
+                script {
+                    ameninoNotification.send('FAILED', null, null)
+                    ameninoCF.deleteOnFail("${env.STACK_NAME}-${newVersion.generic.new}.yml", env.S3_BUCKET_ARTIFACT)
+                    ameninoCF.deleteOnFail("${env.STACK_NAME}-${newVersion.generic.new}.yml", env.S3_BUCKET_TEMPLATE)
+                    echo "failure"
+                }
+            }
+            always {
+                script {
+                    def thisBaseDir = pwd() // Give Jenkins permission to delete root files in the workspace
+                    sh "docker run --rm -v ${thisBaseDir}:/python-app -w /python-app 774515094505.dkr.ecr.us-east-1.amazonaws.com/amenino/pyspark:latest /bin/sh -c 'find ./* -user root -exec chmod o+rw {} +'"
+                    deleteDir() // Must delete after build, random errors occurs reusing workspace
+                }
+            }
+        }
+
+    }
+
+}
+
+def sam(String thisNewVersion, String ecrRepo) {
+    def thisStackName = (env.JOB_NAME =~ /^.+\/(.+)\/.+$/)[0][1]
+    def thisTemplateFile = findFiles(glob: "${thisStackName}.y*ml")
+
+    sh 'python3 -m venv venv && venv/bin/pip install aws-sam-cli'
+    stash includes: '**/venv/**/*', name: 'venv'
+    unstash 'venv'
+
+    sh "sed -i 's/nodejs16.x/nodejs14.x/' ${thisStackName}.yml"
+
+    sh(
+        script: 'find ./* -mtime +10950 -exec touch {} \\;',
+        label: "Changing files permission"
+    )
+
+    echo "Building sam package"
+
+    sh(
+        script: """
+            venv/bin/sam build --template ${thisStackName}.yml
+            """,
+        label: "sam build --${thisStackName}.yml"
+    )
+
+    if (ecrRepo == null || ecrRepo.isEmpty()){
+        sh(
+            script: """
+                venv/bin/sam package --output-template-file ${thisStackName}-${thisNewVersion}.yml --s3-bucket ${env.S3_BUCKET_ARTIFACT}
+                """,
+            label: "Building sam package"
+        )
+    } else{
+        sh(
+            script: """
+                venv/bin/sam package --output-template-file ${thisStackName}-${thisNewVersion}.yml --s3-bucket ${env.S3_BUCKET_ARTIFACT} \
+                --image-repository ${ecrRepo}
+                """,
+            label: "Building sam package with ecr registry"
+        )
+    }
+
+    echo "Upload template to s3://${env.S3_BUCKET_TEMPLATE}"
+    sh(
+        script: "aws s3 cp ${thisStackName}-${thisNewVersion}.yml s3://${env.S3_BUCKET_TEMPLATE}",
+        label: "Upload template to s3://${env.S3_BUCKET_TEMPLATE}"
+        )
+
+    // echo "Upload parameter files to s3://${env.S3_BUCKET_TEMPLATE}"
+    sh(
+        script: "[ -d src/vars ] && tar zvcf ${thisStackName}-params-${thisNewVersion}.tgz src/vars || echo 'Não existe diretório vars com os parameters por ambientes'",
+        label: "Packaging all parameter files"
+        )
+    sh(
+        script: "[ -d src/vars ] && aws s3 cp ${thisStackName}-params-${thisNewVersion}.tgz s3://${env.S3_BUCKET_TEMPLATE} || echo 'Não existe diretório vars com os parameters por ambientes'",
+        label: "Upload parameter files to S3 ${env.S3_BUCKET_TEMPLATE}"
+        )
+
+    def thisUrlTemplate = "s3://${env.S3_BUCKET_TEMPLATE}/${thisStackName}-${thisNewVersion}.yml"
+    echo "s3 template url is : ${thisUrlTemplate}"
+
+    return ["templateFile": thisTemplateFile, "urlTemplate": thisUrlTemplate]
+}
+
+call([
+    functionDir: "dist",
+    isCloudFormation: false,
+    buildType: "nodejs",
+    isSam: true,
+    runUnitTest: true
+    ])

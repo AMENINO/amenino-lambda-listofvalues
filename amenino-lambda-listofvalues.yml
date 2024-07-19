@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: API amenino List Of Values (Projeto Migração OSB/SOA - AWS)
+
+## ___________________________ CONDITIONS 👇 ____________________________________
+
+Conditions:
+  isItProd: !Or
+  - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], blue]
+  - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], green]
+  - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], prd]
+  - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], hml5]
+Parameters:
+  Auth0CustomAudience:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: URL do Custom Audience do Auth0
+
+  Auth0CustomTokenIssuer:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: URL do Custom Token Issuer do Auth0
+
+  DefaultLoggerLevelSSM:
+    Type: String
+    Default: ERROR
+
+  SiebelCredentials:
+    Type: String
+    Default: dev/OracleDBSiebel/intef
+
+  SiebelService:
+    Type: String
+
+  SubnetIDs:
+    Description: Subnet IDs for lambda
+    Type: AWS::SSM::Parameter::Value<String>
+
+  RedisCluster:
+    Type: String
+
+
+## _____________________ GLOBALS 👇 __________________________
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Architectures:
+    - arm64
+    # Tracing: Active
+    Layers:
+    - !Ref RuntimeDependenciesLayer
+    Runtime: nodejs16.x
+    VpcConfig:
+      SecurityGroupIds:
+        - !Sub
+          - '{{resolve:ssm:${env}-lambda-security-group-id}}'
+          - {env: !Select [1, !Split ["-", Ref: "AWS::StackName"]]}
+      SubnetIds:
+        !Split [",", !Ref SubnetIDs]
+    Environment:
+      Variables:
+        ENV_VERSION: !FindInMap [versions, propertiesInfra, version]
+        INFRA_TABLE:
+          Fn::ImportValue:
+            Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "table"]]
+        NODE_TLS_REJECT_UNAUTHORIZED: 0
+        LOGGER_LEVEL: !If [isItProd, !Ref DefaultLoggerLevelSSM, "DEBUG"]
+        SIEBEL_USERNAME: !Sub "{{resolve:secretsmanager:${SiebelCredentials}:SecretString:username}}"
+        SIEBEL_PASSWORD: !Sub "{{resolve:secretsmanager:${SiebelCredentials}:SecretString:password}}"
+        SIEBEL_SERVICE: !Ref SiebelService
+        REDIS_CLUSTER: !Ref RedisCluster
+
+## ____________________________ MAPPINGS 👇 ____________________________________
+
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+Mappings:
+  versions:
+    propertiesInfra:
+      version: 0.3.1
+
+## ____________________________ RESOURCES 👇 ____________________________________
+
+Resources:
+  RuntimeDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Description: Runtime dependencies for Lambdas
+      ContentUri: ./
+      CompatibleRuntimes:
+      - nodejs16.x
+      CompatibleArchitectures:
+      - arm64
+      RetentionPolicy: Retain
+
+  ListOfValuesHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: LIVE
+      StageVariables:
+        ApiTitle: "ListOfValues"
+        ApiType: "HttpApi"
+      DefinitionBody:
+        schemes:
+        - https
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: openapi.yaml
+
+  BasePathMappingHttpApi:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      DomainName:
+        Fn::ImportValue:
+          Fn::Join:
+          - "-"
+          - - cfstack
+            - !Select [1, !Split ["-", Ref: "AWS::StackName"]]
+            - amenino-api-domains-cf-infra
+            - CustomDomainBr
+      ApiId: !Ref ListOfValuesHttpApi
+      Stage: !Ref ListOfValuesHttpApi.Stage
+      ApiMappingKey: "act/listofvalues"
+
+  ListOfValuesApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/vendedlogs/${ListOfValuesPrivateApi}
+      RetentionInDays: 30
+
+  ListOfValuesPrivateApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Join ["-", [Ref: "AWS::StackName", "private-api"]]
+      StageName: LIVE
+      AccessLogSetting:
+        DestinationArn: !Sub ${ListOfValuesApiLogGroup.Arn}
+        Format: "$context.requestId | $context.error.message | $context.integrationErrorMessage | $context.authorizer.error | $context.identity.sourceIp"
+      EndpointConfiguration: REGIONAL
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource:
+            - 'execute-api:/*/*/*'
+          - Effect: Deny
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource:
+            - 'execute-api:/*/*/*'
+            Condition:
+              NotIpAddress:
+                aws:SourceIp:
+                - '177.92.111.224/27'
+                - '18.235.16.247/32'
+                - '187.5.36.176/29'
+                - '187.5.36.48/29'
+                - '187.5.36.56/29'
+                - '187.72.92.192/27'
+                - '187.72.92.193/32'
+                - '187.95.145.12/30'
+                - '187.95.156.16/29'
+                - '189.11.39.168/29'
+                - '189.112.36.192/27'
+                - '189.125.42.48/29'
+                - '189.45.137.224/27'
+                - '200.146.214.208/29'
+                - '200.185.134.137/32'
+                - '200.185.134.7/32'
+                - '200.185.134.8/32'
+                - '200.185.51.25/32'
+                - '200.185.70.152/32'
+                - '200.185.70.153/32'
+                - '200.186.56.96/28'
+                - '200.250.59.114/28'
+                - '201.56.194.2/28'
+                - '34.192.133.45/32'
+                - '34.192.27.50/32'
+                - '34.203.180.134/32'
+                - '34.225.172.169'
+                - '34.238.0.46'
+                - '52.203.31.131'
+                - '52.3.177.230'
+                - '52.86.16.8'
+                - '54.197.201.206'
+                - '54.236.161.41'
+                - '54.83.206.200/32'
+                - '54.86.74.29/32'
+                - '8.242.181.224/27'
+                - '8.242.60.32/27'
+                - '177.126.170.171'
+                - '177.126.170.172'
+                - '52.44.216.117/32'
+                - '34.194.166.31/32'
+
+  BasePathMappingApi:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      DomainName:
+        Fn::ImportValue:
+          Fn::Join:
+          - "-"
+          - - cfstack
+            - !Select [1, !Split ["-", Ref: "AWS::StackName"]]
+            - amenino-api-domains-cf-infra
+            - CustomDomainBr
+      ApiId: !Ref ListOfValuesPrivateApi
+      Stage: !Ref ListOfValuesPrivateApi.Stage
+      ApiMappingKey: "act/listofvalues/soap"
+
+  GetValuesByType:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: AWS::StackName
+          - GetValues
+      Handler: dist/handlers/getValuesByType.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /values
+            Method: get
+            ApiId: !Ref ListOfValuesHttpApi
+
+  GetValuesByTypeSOAP:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: AWS::StackName
+          - GetValuesByTypeSOAP
+      Handler: dist/handlers/getValuesByType.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        RestApi:
+          Type: Api
+          Properties:
+            Path: /values
+            Method: post
+            RestApiId: !Ref ListOfValuesPrivateApi
+
+  GetValuesByTypeSOAPLogGroupSub:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GetValuesByTypeSOAP}
+      RetentionInDays: 30
+
+  GetValuesByTypeLogGroupSub:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GetValuesByType}
+      RetentionInDays: 30
