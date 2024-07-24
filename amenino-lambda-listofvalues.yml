@@ -89,7 +89,7 @@ Resources:
       Description: Runtime dependencies for Lambdas
       ContentUri: ./
       CompatibleRuntimes:
-      - nodejs16.x
+      - nodejs20.x
       CompatibleArchitectures:
       - arm64
       RetentionPolicy: Retain
