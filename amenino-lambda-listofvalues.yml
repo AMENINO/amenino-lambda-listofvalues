@@ -49,7 +49,7 @@ Globals:
     # Tracing: Active
     Layers:
     - !Ref RuntimeDependenciesLayer
-    Runtime: nodejs16.x
+    Runtime: nodejs20.x
     VpcConfig:
       SecurityGroupIds:
         - !Sub
